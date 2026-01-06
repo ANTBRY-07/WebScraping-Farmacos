@@ -56,7 +56,7 @@ def escanear_catalogo():
     page = 1
     # ⚠️ IMPORTANTE: Pon aquí cuántas páginas quieres escanear (ej. 5). 
     # Si pones 100, tardará bastante.
-    MAX_PAGES = 54 
+    MAX_PAGES = 53
     
     while page <= MAX_PAGES:
         # Construcción de la URL de paginación (Confirmada por tu captura image_5e3c05.png)
