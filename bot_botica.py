@@ -5,8 +5,8 @@ import time
 import random
 
 # --- CONFIGURACIÓN ---
-# URL Base corregida (la que funciona)
-BASE_URL = "https://www.hogarysalud.com.pe/c/salud-y-bienestar/"
+# URL (URL de las categorias de la pagina)
+BASE_URL = "https://www.hogarysalud.com.pe/c/nutricion/"
 
 # Cabeceras para simular un navegador real
 HEADERS = {
@@ -56,10 +56,10 @@ def escanear_catalogo():
     page = 1
     # ⚠️ IMPORTANTE: Pon aquí cuántas páginas quieres escanear (ej. 5). 
     # Si pones 100, tardará bastante.
-    MAX_PAGES = 53
+    MAX_PAGES = 11
     
     while page <= MAX_PAGES:
-        # Construcción de la URL de paginación (Confirmada por tu captura image_5e3c05.png)
+        # Construcción de la URL de paginación
         if page == 1:
             url_actual = BASE_URL
         else:
@@ -70,7 +70,7 @@ def escanear_catalogo():
         
         if not soup: break
         
-        # --- SELECTOR MAESTRO (Basado en tu imagen image_5e91a0.png) ---
+        # --- SELECTOR MAESTRO ---
         # Buscamos 'div' que tenga la clase 'wd-product'
         productos = soup.select('div.wd-product')
         
@@ -82,7 +82,7 @@ def escanear_catalogo():
         
         for prod in productos:
             try:
-                # 1. TÍTULO Y LINK (Basado en image_5e8e7f.png)
+                # 1. TÍTULO Y LINK 
                 # Buscamos la clase 'wd-entities-title'
                 tag_titulo = prod.select_one('.wd-entities-title a')
                 
@@ -91,7 +91,7 @@ def escanear_catalogo():
                 nombre = tag_titulo.get_text(strip=True)
                 link = tag_titulo['href']
                 
-                # 2. PRECIO (Basado en image_5e389e.png)
+                # 2. PRECIO
                 # Buscamos la clase 'price'
                 tag_precio = prod.select_one('.price')
                 precio = tag_precio.get_text(strip=True) if tag_precio else "Agotado/Sin precio"
