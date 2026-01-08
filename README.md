@@ -3,6 +3,6 @@ Es necesario descargar el archivo .txt junto con el programa .py.
 
 Informacion recopilada: Productos de Salud y Bienestar
 
-Datoa recopilados: Nombre, Precio, Registro Sanitario, Composición, Descripción, Advertencias, Contraindicaciones y URL.
+Datos: Nombre, Precio, Registro Sanitario, Composición, Descripción, Advertencias, Contraindicaciones y URL.
 
 La version actualizada y actual es bot-boticav3.py
