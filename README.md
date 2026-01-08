@@ -2,4 +2,4 @@ Este repositorio es un reporte sobre el avance de recopilacion de datos sobre la
 Informacion recopilada: Promociones Especiales y Dermatologia Cosmetica
 Datoa recopilados: Nombre, Precio y URL del producto
 
-La version actualizada y actual es bot-boticav2.py
+La version actualizada y actual es bot-boticav3.py
