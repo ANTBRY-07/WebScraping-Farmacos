@@ -4,6 +4,7 @@ import pandas as pd
 import time
 import random
 import unicodedata
+import re
 
 # --- CONFIGURACIÓN ---
 NOMBRE_ARCHIVO_LISTA = "lista_minsa.txt"
@@ -51,6 +52,31 @@ def cumple_filtro_minsa(nombre_producto_web):
            med_clave == nombre_norm:
             return True
     return False
+
+# ==========================================
+# NUEVA FUNCIÓN: LIMPIEZA DE PRECIOS
+# ==========================================
+def analizar_precios(texto_precio):
+    """
+    Convierte 'S/ 0.80 - S/ 7.50 ...' en -> 0.80 y 7.50
+    Si es solo 'S/ 2.20' -> devuelve 2.20 y 2.20
+    """
+    if not texto_precio: return 0.0, 0.0
+    
+    # Buscamos todos los números con decimales (ej: 10.50)
+    # Explicación regex: \d+ (números) \. (punto) \d+ (decimales)
+    numeros = re.findall(r'(\d+\.\d{2})', texto_precio)
+    
+    if not numeros:
+        return 0.0, 0.0
+    
+    # Convertimos a flotantes (números reales)
+    valores = [float(n) for n in numeros]
+    
+    min_val = min(valores)
+    max_val = max(valores)
+    
+    return min_val, max_val
 
 # ==========================================
 # 3. EL NAVEGADOR (Crawler Mejorado)
@@ -181,8 +207,12 @@ def procesar_categoria(url_categoria):
                     continue 
                 
                 link = tag_titulo['href']
+                # --- CAMBIO AQUÍ: Extracción inteligente de precio ---
                 tag_precio = prod.select_one('.price')
-                precio = tag_precio.get_text(separator=' ', strip=True) if tag_precio else "0"
+                texto_precio_bruto = tag_precio.get_text(separator=' ', strip=True) if tag_precio else ""
+                
+                # Usamos la nueva función para separar los montos
+                precio_min, precio_max = analizar_precios(texto_precio_bruto)
                 
                 # 3. EXTRACCIÓN PROFUNDA (Entrar al link)
                 time.sleep(random.uniform(0.5, 1.0)) # Pausa antibloqueo
@@ -193,7 +223,8 @@ def procesar_categoria(url_categoria):
                 item_final = {
                     'Categoría': nombre_cat,
                     'Nombre': nombre,
-                    'Precio': precio,
+                    'Precio Mínimo (S/)': precio_min,  # Columna numérica limpia
+                    'Precio Máximo (S/)': precio_max,  # Columna numérica limpia
                     'Registro Sanitario': detalles['Registro Sanitario'],
                     'Composición': detalles['Composición'],
                     'Descripción': detalles['Descripción'],
