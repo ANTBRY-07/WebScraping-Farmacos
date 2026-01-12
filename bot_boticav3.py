@@ -5,10 +5,12 @@ import time
 import random
 import unicodedata
 import re
+import concurrent.futures # <--- EL MOTOR TURBO
 
 # --- CONFIGURACIÓN ---
 NOMBRE_ARCHIVO_LISTA = "lista_minsa.txt"
 URL_HOME = "https://www.hogarysalud.com.pe"
+MAX_WORKERS = 5  # <--- NÚMERO DE "REPARTIDORES" SIMULTÁNEOS (No subas de 10)
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept-Language': 'es-ES,es;q=0.9'
@@ -16,260 +18,195 @@ HEADERS = {
 
 DATOS_RECOPILADOS = []
 LISTA_MINSA = set()
+session = requests.Session() # <--- CONEXIÓN PERSISTENTE
+session.headers.update(HEADERS)
 
 # ==========================================
-# 1. HERRAMIENTAS DE TEXTO (Normalización)
+# 1. HERRAMIENTAS Y FILTROS
 # ==========================================
 def normalizar(texto):
-    """ Quita tildes, pasa a mayúsculas y limpia espacios """
     if not isinstance(texto, str): return ""
     texto = texto.upper()
     return ''.join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn')
 
-# ==========================================
-# 2. CARGADOR DE LISTA (Filtro TXT)
-# ==========================================
 def cargar_filtro_txt():
-    print(f"📖 Leyendo lista de medicamentos esenciales desde: {NOMBRE_ARCHIVO_LISTA}...")
+    print(f"📖 Leyendo lista segura: {NOMBRE_ARCHIVO_LISTA}...")
     global LISTA_MINSA
     try:
         with open(NOMBRE_ARCHIVO_LISTA, 'r', encoding='utf-8') as f:
             for linea in f:
                 med = linea.strip()
-                if len(med) > 3:
-                    LISTA_MINSA.add(normalizar(med))
-        print(f"✅ Filtro cargado: {len(LISTA_MINSA)} medicamentos seguros.")
+                if len(med) > 3: LISTA_MINSA.add(normalizar(med))
+        print(f"✅ Filtro cargado: {len(LISTA_MINSA)} medicamentos.")
     except FileNotFoundError:
-        print(f"❌ ERROR: No existe '{NOMBRE_ARCHIVO_LISTA}'. Crea el archivo primero.")
+        print(f"❌ ERROR: Crea '{NOMBRE_ARCHIVO_LISTA}' primero.")
 
 def cumple_filtro_minsa(nombre_producto_web):
-    """ Compara el producto web contra tu lista TXT normalizada """
     nombre_norm = normalizar(nombre_producto_web)
-    for med_clave in LISTA_MINSA:
-        # Lógica de coincidencia robusta (evita falsos positivos parciales)
-        if f" {med_clave} " in f" {nombre_norm} " or \
-           nombre_norm.startswith(f"{med_clave} ") or \
-           med_clave == nombre_norm:
+    for med in LISTA_MINSA:
+        if f" {med} " in f" {nombre_norm} " or nombre_norm.startswith(f"{med} ") or med == nombre_norm:
             return True
     return False
 
-# ==========================================
-# NUEVA FUNCIÓN: LIMPIEZA DE PRECIOS
-# ==========================================
 def analizar_precios(texto_precio):
-    """
-    Convierte 'S/ 0.80 - S/ 7.50 ...' en -> 0.80 y 7.50
-    Si es solo 'S/ 2.20' -> devuelve 2.20 y 2.20
-    """
     if not texto_precio: return 0.0, 0.0
-    
-    # Buscamos todos los números con decimales (ej: 10.50)
-    # Explicación regex: \d+ (números) \. (punto) \d+ (decimales)
     numeros = re.findall(r'(\d+\.\d{2})', texto_precio)
-    
-    if not numeros:
-        return 0.0, 0.0
-    
-    # Convertimos a flotantes (números reales)
+    if not numeros: return 0.0, 0.0
     valores = [float(n) for n in numeros]
-    
-    min_val = min(valores)
-    max_val = max(valores)
-    
-    return min_val, max_val
+    return min(valores), max(valores)
 
 # ==========================================
-# 3. EL NAVEGADOR (Crawler Mejorado)
+# 2. NAVEGADOR MEJORADO
 # ==========================================
 def obtener_sopa(url):
     try:
-        response = requests.get(url, headers=HEADERS, timeout=25)
+        # Usamos 'session' en lugar de 'requests' directo
+        response = session.get(url, timeout=20)
         if response.status_code == 200:
             return BeautifulSoup(response.content, 'html.parser')
-    except Exception as e:
-        print(f"⚠️ Error conectando a {url}: {e}")
+    except: pass
     return None
 
 def descubrir_categorias_menu():
-    """ Usa la lógica del primer código que funcionaba mejor para detectar el menú principal """
-    print(f"🌎 Conectando a {URL_HOME} para leer el menú...")
+    print(f"🌎 Conectando a {URL_HOME}...")
     soup = obtener_sopa(URL_HOME)
-    
     if not soup: return []
+    lista = []
+    menu = soup.find('ul', id='menu-mega-menu-categorias')
+    if menu:
+        for item in menu.find_all('li', recursive=False):
+            link = item.find('a', href=True)
+            if link and '/c/' in link['href']:
+                lista.append(link['href'])
+    return lista
 
-    lista_urls_final = []
-    
-    # Buscamos el contenedor del menú por su ID específico
-    menu_container = soup.find('ul', id='menu-mega-menu-categorias')
-    
-    if menu_container:
-        print("✅ Menú encontrado. Filtrando solo categorías principales...")
-        # recursive=False es clave para no tomar subcategorías
-        items_principales = menu_container.find_all('li', recursive=False)
+# ==========================================
+# 3. PROCESADOR DE UN SOLO PRODUCTO (Worker)
+# ==========================================
+def procesar_producto_individual(datos_base):
+    """ Esta función será ejecutada por múltiples hilos a la vez """
+    try:
+        nombre = datos_base['Nombre']
+        link = datos_base['URL']
         
-        for item in items_principales:
-            enlace = item.find('a', href=True)
-            if enlace:
-                url = enlace['href']
-                texto = enlace.get_text(strip=True)
-                
-                # Validación de seguridad
-                if '/c/' in url and 'hogarysalud.com.pe' in url:
-                    lista_urls_final.append(url)
-                    print(f"   🔹 Categoría detectada: {texto}")
-    else:
-        print("⚠️ No se pudo leer el menú principal (ID no encontrado).")
+        # 1. Filtro (Rápido, en memoria)
+        if not cumple_filtro_minsa(nombre):
+            return None # Ignoramos si no es esencial
 
-    print(f"📋 Total: {len(lista_urls_final)} categorías listas para procesar.")
-    return lista_urls_final
-
-# ==========================================
-# 4. EXTRACTOR DE DETALLES (Deep Scraping)
-# ==========================================
-def extraer_detalles_profundos(soup_producto):
-    """ Extrae Registro Sanitario, Composición, etc. del detalle del producto """
-    info = {
-        'Descripción': 'No especificado',
-        'Advertencias': 'No especificado',
-        'Contraindicaciones': 'No especificado',
-        'Composición': 'No especificado',
-        'Registro Sanitario': 'No especificado'
-    }
-    
-    if not soup_producto: return info
-
-    # A) BUSCAR EN ACORDEONES (Pestañas desplegables)
-    items_acordeon = soup_producto.select('div.wd-accordion-item')
-    for item in items_acordeon:
-        try:
-            titulo_tag = item.select_one('.wd-accordion-title-text')
-            contenido_tag = item.select_one('.woocommerce-Tabs-panel')
+        # 2. Extracción Profunda (Lento, requiere red)
+        # Pequeña pausa aleatoria para que los hilos no golpeen al unísono exacto
+        time.sleep(random.uniform(0.1, 0.5)) 
+        soup = obtener_sopa(link)
+        
+        info = {
+            'Registro Sanitario': 'No especificado', 'Composición': 'No especificado',
+            'Descripción': 'No especificado', 'Advertencias': 'No especificado',
+            'Contraindicaciones': 'No especificado'
+        }
+        
+        if soup:
+            # Acordeones
+            for item in soup.select('div.wd-accordion-item'):
+                t = item.select_one('.wd-accordion-title-text')
+                c = item.select_one('.woocommerce-Tabs-panel')
+                if t and c:
+                    tit = t.get_text(strip=True).lower()
+                    cont = c.get_text(separator=' ', strip=True)
+                    if 'descripci' in tit: info['Descripción'] = cont
+                    elif 'advertencia' in tit: info['Advertencias'] = cont
+                    elif 'contraindicaci' in tit: info['Contraindicaciones'] = cont
+                    elif 'composici' in tit: info['Composición'] = cont
             
-            if titulo_tag and contenido_tag:
-                titulo = titulo_tag.get_text(strip=True).lower()
-                contenido = contenido_tag.get_text(separator=' ', strip=True)
-                
-                if 'descripci' in titulo: info['Descripción'] = contenido
-                elif 'advertencia' in titulo: info['Advertencias'] = contenido
-                elif 'contraindicaci' in titulo: info['Contraindicaciones'] = contenido
-                elif 'composici' in titulo: info['Composición'] = contenido
-        except: continue
+            # Tabla atributos
+            for row in soup.select('tr.woocommerce-product-attributes-item'):
+                th = row.select_one('th')
+                td = row.select_one('td')
+                if th and td:
+                    label = th.get_text(strip=True).lower()
+                    val = td.get_text(strip=True)
+                    if 'registro' in label: info['Registro Sanitario'] = val
+                    elif 'composici' in label and info['Composición'] == 'No especificado': info['Composición'] = val
 
-    # B) BUSCAR EN TABLA DE ATRIBUTOS (Registro Sanitario)
-    tabla_atributos = soup_producto.select('tr.woocommerce-product-attributes-item')
-    for fila in tabla_atributos:
-        try:
-            texto_label = fila.select_one('th').get_text(strip=True).lower()
-            texto_valor = fila.select_one('td').get_text(strip=True)
-            
-            if 'registro' in texto_label or 'sanitario' in texto_label:
-                info['Registro Sanitario'] = texto_valor
-            elif 'composici' in texto_label and info['Composición'] == 'No especificado':
-                info['Composición'] = texto_valor
-        except: continue
+        # Retornamos el diccionario completo
+        datos_base.update(info)
+        return datos_base
 
-    return info
+    except Exception as e:
+        return None
 
 # ==========================================
-# 5. PROCESADOR PRINCIPAL (Mejorado)
+# 4. GESTOR DE CATEGORÍA (El Jefe de los Hilos)
 # ==========================================
-def procesar_categoria(url_categoria):
+def procesar_categoria(url_cat):
     page = 1
-    MAX_PAGES = 100 # Ajusta según necesites
-    
-    # Obtener nombre limpio de la categoría
-    nombre_cat = url_categoria.strip('/').split('/')[-1].replace('-', ' ').title()
-    print(f"\n📂 PROCESANDO: {nombre_cat}")
-    
+    MAX_PAGES = 100
+    nombre_cat = url_cat.strip('/').split('/')[-1].replace('-', ' ').title()
+    print(f"\n📂 CATEGORÍA: {nombre_cat}")
+
     while page <= MAX_PAGES:
-        url_actual = url_categoria if page == 1 else f"{url_categoria}page/{page}/"
-        soup = obtener_sopa(url_actual)
-        
+        url = url_cat if page == 1 else f"{url_cat}page/{page}/"
+        soup = obtener_sopa(url)
         if not soup: break
         
-        # Selector de productos
-        productos = soup.select('div.wd-product')
-        if not productos: break
+        productos_html = soup.select('div.wd-product')
+        if not productos_html: break
+        
+        print(f"  --> Pág {page}: {len(productos_html)} productos detectados. Procesando en paralelo...")
+        
+        # A) Preparamos la lista de tareas
+        tareas = []
+        for prod in productos_html:
+            tag_a = prod.select_one('.wd-entities-title a')
+            if not tag_a: continue
             
-        print(f"  --> Pág {page}: {len(productos)} productos detectados.")
+            tag_p = prod.select_one('.price')
+            txt_p = tag_p.get_text(separator=' ', strip=True) if tag_p else ""
+            p_min, p_max = analizar_precios(txt_p)
+            
+            datos_iniciales = {
+                'Categoría': nombre_cat,
+                'Nombre': tag_a.get_text(strip=True),
+                'Precio Mínimo (S/)': p_min,
+                'Precio Máximo (S/)': p_max,
+                'URL': tag_a['href']
+            }
+            tareas.append(datos_iniciales)
+
+        # B) Lanzamos los hilos (ThreadPoolExecutor)
+        # Esto hace que se procesen MAX_WORKERS productos al mismo tiempo
+        guardados_pagina = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            resultados = list(executor.map(procesar_producto_individual, tareas))
         
-        contador_guardados = 0
-        for prod in productos:
-            try:
-                # 1. Extracción Básica
-                tag_titulo = prod.select_one('.wd-entities-title a')
-                if not tag_titulo: continue
-                
-                nombre = tag_titulo.get_text(strip=True)
-                
-                # 2. FILTRO MINSA (Solo procesamos si es esencial)
-                if not cumple_filtro_minsa(nombre):
-                    continue 
-                
-                link = tag_titulo['href']
-                # --- CAMBIO AQUÍ: Extracción inteligente de precio ---
-                tag_precio = prod.select_one('.price')
-                texto_precio_bruto = tag_precio.get_text(separator=' ', strip=True) if tag_precio else ""
-                
-                # Usamos la nueva función para separar los montos
-                precio_min, precio_max = analizar_precios(texto_precio_bruto)
-                
-                # 3. EXTRACCIÓN PROFUNDA (Entrar al link)
-                time.sleep(random.uniform(0.5, 1.0)) # Pausa antibloqueo
-                soup_detalle = obtener_sopa(link)
-                detalles = extraer_detalles_profundos(soup_detalle)
-                
-                # 4. Consolidación de datos
-                item_final = {
-                    'Categoría': nombre_cat,
-                    'Nombre': nombre,
-                    'Precio Mínimo (S/)': precio_min,  # Columna numérica limpia
-                    'Precio Máximo (S/)': precio_max,  # Columna numérica limpia
-                    'Registro Sanitario': detalles['Registro Sanitario'],
-                    'Composición': detalles['Composición'],
-                    'Descripción': detalles['Descripción'],
-                    'Advertencias': detalles['Advertencias'],
-                    'Contraindicaciones': detalles['Contraindicaciones'],
-                    'URL': link
-                }
-                
-                DATOS_RECOPILADOS.append(item_final)
-                contador_guardados += 1
-                
-            except Exception: continue
+        # C) Recolectamos resultados válidos
+        for res in resultados:
+            if res: # Si no es None (o sea, pasó el filtro y se extrajo)
+                DATOS_RECOPILADOS.append(res)
+                guardados_pagina += 1
         
-        print(f"      ✅ Guardados: {contador_guardados} productos esenciales.")
+        print(f"      ✅ Se guardaron {guardados_pagina} esenciales de esta página.")
         
-        # Paginación
         if not soup.select_one('.next'): break
         page += 1
 
 # ==========================================
-# EJECUCIÓN MAESTRA
+# EJECUCIÓN
 # ==========================================
-# 1. Cargamos el filtro TXT
 cargar_filtro_txt()
-
 if LISTA_MINSA:
-    # 2. Obtenemos las categorías principales
     cats = descubrir_categorias_menu()
-    
     if cats:
-        print(f"🚀 Iniciando extracción filtrada en {len(cats)} categorías...")
+        start_time = time.time() # Cronómetro
         for cat in cats:
             procesar_categoria(cat)
-            time.sleep(2) # Respiro entre categorías
         
-        # 3. Guardado final
         if DATOS_RECOPILADOS:
             df = pd.DataFrame(DATOS_RECOPILADOS)
-            archivo_final = 'catalogo_minsa_completo.xlsx'
-            df.to_excel(archivo_final, index=False)
-            print(f"\n🎉 ¡ÉXITO! Se ha generado: {archivo_final}")
-            print(f"Total de productos procesados: {len(DATOS_RECOPILADOS)}")
+            df.to_excel('catalogo_turbo_minsa.xlsx', index=False)
+            mins = (time.time() - start_time) / 60
+            print(f"\n🏁 ¡TERMINADO EN {mins:.2f} MINUTOS!")
+            print(f"Archivo guardado: catalogo_turbo_minsa.xlsx")
         else:
-            print("\n⚠️ El script terminó, pero no encontró coincidencias con tu lista del MINSA.")
-    else:
-        print("❌ No se encontraron categorías en la web.")
+            print("⚠️ No se encontraron datos.")
 else:
-    print("❌ Lista MINSA vacía o archivo no encontrado.")
+    print("❌ Lista MINSA vacía.")
